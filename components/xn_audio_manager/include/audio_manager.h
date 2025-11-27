@@ -11,12 +11,38 @@
 #pragma once
 
 #include "esp_err.h"
+#include "audio_bsp.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// ============ 调度与缓冲配置宏 ============
+
+#define AUDIO_MANAGER_TASK_STACK_SIZE        (4 * 1024)
+#define AUDIO_MANAGER_TASK_PRIORITY          7
+#define AUDIO_MANAGER_EVENT_QUEUE_LENGTH     16
+#define AUDIO_MANAGER_STEP_INTERVAL_MS       100
+#define AUDIO_MANAGER_DEFAULT_VOLUME         80
+
+#define AUDIO_MANAGER_PLAYBACK_FRAME_SAMPLES 1024
+#define AUDIO_MANAGER_PLAYBACK_BUFFER_BYTES  (512 * 1024)
+#define AUDIO_MANAGER_REFERENCE_BUFFER_BYTES (16 * 1024)
+
+// ============ 状态机定义 ============
+
+typedef enum {
+    AUDIO_MGR_STATE_DISABLED = 0,
+    AUDIO_MGR_STATE_IDLE,
+    AUDIO_MGR_STATE_LISTENING,
+    AUDIO_MGR_STATE_RECORDING,
+    AUDIO_MGR_STATE_PLAYBACK,
+} audio_mgr_state_t;
+
+typedef void (*audio_mgr_state_cb_t)(audio_mgr_state_t state, void *user_ctx);
 
 // ============ 事件定义 ============
 
@@ -46,32 +72,13 @@ typedef void (*audio_mgr_event_cb_t)(const audio_mgr_event_t *event, void *user_
 
 // ============ 配置结构 ============
 
-/** 硬件I2S配置（应用层提供） */
+/** 硬件配置（应用层提供） */
 typedef struct {
-    // 麦克风I2S配置
+    audio_bsp_mic_config_t     mic;     ///< 麦克风 I2S 配置
+    audio_bsp_speaker_config_t speaker; ///< 扬声器 I2S 配置
     struct {
-        int port;           ///< I2S端口号
-        int bclk_gpio;      ///< 位时钟
-        int lrck_gpio;      ///< 左右声道时钟
-        int din_gpio;       ///< 数据输入
-        int sample_rate;    ///< 采样率（固定16000）
-        int bits;           ///< 位深度（32bit硬件采集）
-    } mic;
-
-    // 扬声器I2S配置
-    struct {
-        int port;           ///< I2S端口号
-        int bclk_gpio;      ///< 位时钟
-        int lrck_gpio;      ///< 左右声道时钟
-        int dout_gpio;      ///< 数据输出
-        int sample_rate;    ///< 采样率（固定16000）
-        int bits;           ///< 位深度（16bit）
-    } speaker;
-
-    // 按键配置
-    struct {
-        int gpio;           ///< 按键GPIO
-        bool active_low;    ///< 低电平有效
+        int  gpio;                      ///< 按键 GPIO
+        bool active_low;                ///< 低电平有效
     } button;
 } audio_mgr_hw_config_t;
 
@@ -108,8 +115,61 @@ typedef struct {
     audio_mgr_vad_config_t     vad_config;      ///< VAD配置
     audio_mgr_afe_config_t     afe_config;      ///< AFE配置
     audio_mgr_event_cb_t       event_callback;  ///< 事件回调
+    audio_mgr_state_cb_t       state_callback;  ///< 状态机回调
     void                      *user_ctx;        ///< 用户上下文
 } audio_mgr_config_t;
+
+#define AUDIO_MANAGER_DEFAULT_HW_CONFIG()                            \
+    (audio_mgr_hw_config_t){                                         \
+        .mic = {                                                     \
+            .port = 0, .bclk_gpio = -1, .lrck_gpio = -1, .din_gpio = -1, \
+            .sample_rate = 16000, .bits = 32,                        \
+            .max_frame_samples = 512, .bit_shift = 14,               \
+        },                                                           \
+        .speaker = {                                                 \
+            .port = 0, .bclk_gpio = -1, .lrck_gpio = -1, .dout_gpio = -1, \
+            .sample_rate = 16000, .bits = 16,                        \
+            .max_frame_samples = AUDIO_MANAGER_PLAYBACK_FRAME_SAMPLES,\
+        },                                                           \
+        .button = { .gpio = -1, .active_low = true },                \
+    }
+
+#define AUDIO_MANAGER_DEFAULT_WAKEUP_CONFIG()                        \
+    (audio_mgr_wakeup_config_t){                                     \
+        .enabled = true,                                             \
+        .wake_word_name = "小鸭小鸭",                                \
+        .model_partition = "model",                                  \
+        .sensitivity = 2,                                            \
+        .wakeup_timeout_ms = 8000,                                   \
+        .wakeup_end_delay_ms = 1200,                                 \
+    }
+
+#define AUDIO_MANAGER_DEFAULT_VAD_CONFIG()                           \
+    (audio_mgr_vad_config_t){                                        \
+        .enabled = true,                                             \
+        .vad_mode = 2,                                               \
+        .min_speech_ms = 200,                                        \
+        .min_silence_ms = 400,                                       \
+    }
+
+#define AUDIO_MANAGER_DEFAULT_AFE_CONFIG()                           \
+    (audio_mgr_afe_config_t){                                        \
+        .aec_enabled = true,                                         \
+        .ns_enabled = true,                                          \
+        .agc_enabled = true,                                         \
+        .afe_mode = 1,                                               \
+    }
+
+#define AUDIO_MANAGER_DEFAULT_CONFIG()                               \
+    (audio_mgr_config_t){                                            \
+        .hw_config = AUDIO_MANAGER_DEFAULT_HW_CONFIG(),              \
+        .wakeup_config = AUDIO_MANAGER_DEFAULT_WAKEUP_CONFIG(),      \
+        .vad_config = AUDIO_MANAGER_DEFAULT_VAD_CONFIG(),            \
+        .afe_config = AUDIO_MANAGER_DEFAULT_AFE_CONFIG(),            \
+        .event_callback = NULL,                                      \
+        .state_callback = NULL,                                      \
+        .user_ctx = NULL,                                            \
+    }
 
 // ============ API接口 ============
 
@@ -236,6 +296,12 @@ bool audio_manager_is_recording(void);
  * @return true 播放中
  */
 bool audio_manager_is_playing(void);
+
+/**
+ * @brief 获取状态机当前状态
+ * @return audio_mgr_state_t
+ */
+audio_mgr_state_t audio_manager_get_state(void);
 
 // ============ 录音数据回调（应用层实现） ============
 

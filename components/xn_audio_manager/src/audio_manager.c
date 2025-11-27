@@ -10,34 +10,37 @@
  */
 #include "audio_manager.h"
 #include "ring_buffer.h"
-#include "i2s_hal.h"
 #include "playback_controller.h"
 #include "button_handler.h"
 #include "afe_wrapper.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 #include <string.h>
 
 static const char *TAG = "AUDIO_MGR";
 
-// ============ 配置常量 ============
+typedef enum {
+    AUDIO_INT_EVT_START_LISTEN = 0,
+    AUDIO_INT_EVT_STOP_LISTEN,
+    AUDIO_INT_EVT_BUTTON_PRESS,
+    AUDIO_INT_EVT_BUTTON_RELEASE,
+    AUDIO_INT_EVT_WAKE_WORD,
+    AUDIO_INT_EVT_VAD_START,
+    AUDIO_INT_EVT_VAD_END,
+    AUDIO_INT_EVT_WAKE_TIMEOUT,
+} audio_mgr_internal_event_t;
 
-/**
- * @brief 播放帧大小（采样点数）
- * 每次从播放缓冲区读取的采样点数，影响播放延迟和 CPU 占用
- */
-#define PLAYBACK_FRAME_SAMPLES      1024
-
-/**
- * @brief 播放缓冲区大小（字节）
- * 用于缓存待播放的音频数据，512KB 可存储约 6 秒的音频（16kHz, 16bit）
- */
-#define PLAYBACK_BUFFER_SIZE        (512 * 1024)  // 512KB
-
-/**
- * @brief 回采缓冲区大小（字节）
- * 用于存储扬声器播放的音频数据，供 AEC 使用，16KB 可存储约 0.5 秒的音频
- */
-#define REFERENCE_BUFFER_SIZE       (16 * 1024)   // 16KB
+typedef struct {
+    audio_mgr_internal_event_t type;
+    union {
+        struct {
+            int   wake_word_index;
+            float volume_db;
+        } wakeup;
+    } data;
+} audio_mgr_internal_msg_t;
 
 // ============ 音频管理器上下文 ============
 
@@ -55,7 +58,7 @@ typedef struct {
     audio_mgr_config_t config;              ///< 音频管理器配置参数
     
     // 模块句柄
-    i2s_hal_handle_t i2s_hal;              ///< I2S 硬件抽象层句柄
+    audio_bsp_handle_t bsp;                ///< 硬件 BSP 句柄
     playback_controller_handle_t playback_ctrl;  ///< 播放控制器句柄
     button_handler_handle_t button_handler; ///< 按键处理器句柄
     afe_wrapper_handle_t afe_wrapper;      ///< AFE 包装器句柄
@@ -67,11 +70,19 @@ typedef struct {
     bool initialized;                       ///< 是否已初始化
     bool running;                           ///< 是否正在运行（监听音频）
     bool recording;                         ///< 是否正在录音
+    bool playing;                           ///< 是否正在播放
     uint8_t volume;                         ///< 音量（0-100）
+    audio_mgr_state_t state;                ///< 状态机
+    bool wake_active;                       ///< 是否处于唤醒窗口
+    TickType_t wake_deadline_tick;          ///< 唤醒超时tick
     
     // 回调
     audio_record_callback_t record_callback; ///< 录音数据回调函数
     void *record_ctx;                        ///< 录音回调的用户上下文
+
+    // 调度
+    QueueHandle_t event_queue;
+    TaskHandle_t manager_task;
 
 } audio_manager_ctx_t;
 
@@ -80,6 +91,97 @@ typedef struct {
  * 使用静态变量存储，确保全局唯一性
  */
 static audio_manager_ctx_t s_ctx = {0};
+
+static void audio_manager_set_state(audio_mgr_state_t new_state);
+static void audio_manager_refresh_state(void);
+static void audio_manager_notify_event(const audio_mgr_event_t *event);
+static bool audio_manager_post_event(const audio_mgr_internal_msg_t *msg);
+static void audio_manager_handle_internal_event(const audio_mgr_internal_msg_t *msg);
+static void audio_manager_task(void *arg);
+static void audio_manager_tick(void);
+static void audio_manager_arm_wake_timer(int duration_ms);
+static void audio_manager_clear_wake_timer(void);
+
+static void audio_manager_set_state(audio_mgr_state_t new_state)
+{
+    if (s_ctx.state == new_state) {
+        return;
+    }
+    s_ctx.state = new_state;
+    ESP_LOGD(TAG, "state -> %d", new_state);
+    if (s_ctx.config.state_callback) {
+        s_ctx.config.state_callback(new_state, s_ctx.config.user_ctx);
+    }
+}
+
+static void audio_manager_refresh_state(void)
+{
+    if (!s_ctx.initialized) {
+        audio_manager_set_state(AUDIO_MGR_STATE_DISABLED);
+        return;
+    }
+
+    if (s_ctx.playing) {
+        audio_manager_set_state(AUDIO_MGR_STATE_PLAYBACK);
+    } else if (s_ctx.recording) {
+        audio_manager_set_state(AUDIO_MGR_STATE_RECORDING);
+    } else if (s_ctx.running) {
+        audio_manager_set_state(AUDIO_MGR_STATE_LISTENING);
+    } else {
+        audio_manager_set_state(AUDIO_MGR_STATE_IDLE);
+    }
+}
+
+static void audio_manager_notify_event(const audio_mgr_event_t *event)
+{
+    if (!event || !s_ctx.config.event_callback) {
+        return;
+    }
+    s_ctx.config.event_callback(event, s_ctx.config.user_ctx);
+}
+
+static bool audio_manager_post_event(const audio_mgr_internal_msg_t *msg)
+{
+    if (!s_ctx.event_queue || !msg) {
+        return false;
+    }
+    if (xQueueSend(s_ctx.event_queue, msg, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "event queue full, drop type=%d", msg->type);
+        return false;
+    }
+    return true;
+}
+
+static void audio_manager_arm_wake_timer(int duration_ms)
+{
+    if (duration_ms <= 0) {
+        audio_manager_clear_wake_timer();
+        return;
+    }
+    s_ctx.wake_active = true;
+    s_ctx.wake_deadline_tick = xTaskGetTickCount() + pdMS_TO_TICKS(duration_ms);
+}
+
+static void audio_manager_clear_wake_timer(void)
+{
+    s_ctx.wake_active = false;
+    s_ctx.wake_deadline_tick = 0;
+}
+
+static void audio_manager_tick(void)
+{
+    if (!s_ctx.wake_active) {
+        return;
+    }
+    TickType_t now = xTaskGetTickCount();
+    if ((int32_t)(now - s_ctx.wake_deadline_tick) >= 0) {
+        s_ctx.wake_active = false;
+        audio_mgr_internal_msg_t msg = {
+            .type = AUDIO_INT_EVT_WAKE_TIMEOUT,
+        };
+        audio_manager_handle_internal_event(&msg);
+    }
+}
 
 // ============ 内部回调函数 ============
 
@@ -94,22 +196,11 @@ static audio_manager_ctx_t s_ctx = {0};
  */
 static void button_event_handler(button_event_type_t event, void *user_ctx)
 {
-    // 检查是否有事件回调函数
-    if (!s_ctx.config.event_callback) return;
-    
-    // 构造音频管理器事件
-    audio_mgr_event_t mgr_event = {0};
-    
-    if (event == BUTTON_EVENT_PRESS) {
-        ESP_LOGI(TAG, "🔘 按键按下，触发对话");
-        mgr_event.type = AUDIO_MGR_EVENT_BUTTON_TRIGGER;
-    } else if (event == BUTTON_EVENT_RELEASE) {
-        ESP_LOGI(TAG, "🔘 按键松开");
-        mgr_event.type = AUDIO_MGR_EVENT_BUTTON_RELEASE;
-    }
-    
-    // 通知上层应用
-    s_ctx.config.event_callback(&mgr_event, s_ctx.config.user_ctx);
+    audio_mgr_internal_msg_t msg = {
+        .type = (event == BUTTON_EVENT_PRESS) ? AUDIO_INT_EVT_BUTTON_PRESS
+                                              : AUDIO_INT_EVT_BUTTON_RELEASE,
+    };
+    audio_manager_post_event(&msg);
 }
 
 /**
@@ -123,33 +214,31 @@ static void button_event_handler(button_event_type_t event, void *user_ctx)
  */
 static void afe_event_handler(const afe_event_t *event, void *user_ctx)
 {
-    // 检查是否有事件回调函数
-    if (!s_ctx.config.event_callback) return;
-    
-    // 构造音频管理器事件
-    audio_mgr_event_t mgr_event = {0};
-    
+    if (!event) {
+        return;
+    }
+
+    audio_mgr_internal_msg_t msg = {0};
+
     switch (event->type) {
         case AFE_EVENT_WAKEUP_DETECTED:
-            // 唤醒词检测事件
-            mgr_event.type = AUDIO_MGR_EVENT_WAKEUP_DETECTED;
-            mgr_event.data.wakeup.wake_word_index = event->data.wakeup.wake_word_index;
-            mgr_event.data.wakeup.volume_db = event->data.wakeup.volume_db;
+            msg.type = AUDIO_INT_EVT_WAKE_WORD;
+            msg.data.wakeup.wake_word_index = event->data.wakeup.wake_word_index;
+            msg.data.wakeup.volume_db = event->data.wakeup.volume_db;
             break;
             
         case AFE_EVENT_VAD_START:
-            // VAD 开始检测到语音
-            mgr_event.type = AUDIO_MGR_EVENT_VAD_START;
+            msg.type = AUDIO_INT_EVT_VAD_START;
             break;
             
         case AFE_EVENT_VAD_END:
-            // VAD 检测到语音结束
-            mgr_event.type = AUDIO_MGR_EVENT_VAD_END;
+            msg.type = AUDIO_INT_EVT_VAD_END;
             break;
+        default:
+            return;
     }
-    
-    // 通知上层应用
-    s_ctx.config.event_callback(&mgr_event, s_ctx.config.user_ctx);
+
+    audio_manager_post_event(&msg);
 }
 
 /**
@@ -166,6 +255,96 @@ static void afe_record_handler(const int16_t *pcm_data, size_t samples, void *us
     // 如果设置了录音回调，则调用它
     if (s_ctx.record_callback) {
         s_ctx.record_callback(pcm_data, samples, s_ctx.record_ctx);
+    }
+}
+
+static void audio_manager_handle_internal_event(const audio_mgr_internal_msg_t *msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    audio_mgr_event_t evt = {0};
+
+    switch (msg->type) {
+    case AUDIO_INT_EVT_START_LISTEN:
+        if (!s_ctx.running) {
+            ESP_LOGI(TAG, "🎧 启动音频监听");
+        }
+        s_ctx.running = true;
+        audio_manager_clear_wake_timer();
+        audio_manager_refresh_state();
+        break;
+
+    case AUDIO_INT_EVT_STOP_LISTEN:
+        if (s_ctx.running) {
+            ESP_LOGI(TAG, "🛑 停止音频监听");
+        }
+        s_ctx.running = false;
+        s_ctx.recording = false;
+        audio_manager_clear_wake_timer();
+        audio_manager_refresh_state();
+        break;
+
+    case AUDIO_INT_EVT_BUTTON_PRESS:
+        ESP_LOGI(TAG, "🔘 按键按下");
+        evt.type = AUDIO_MGR_EVENT_BUTTON_TRIGGER;
+        audio_manager_notify_event(&evt);
+        s_ctx.recording = true;
+        audio_manager_arm_wake_timer(s_ctx.config.wakeup_config.wakeup_timeout_ms);
+        audio_manager_refresh_state();
+        break;
+
+    case AUDIO_INT_EVT_BUTTON_RELEASE:
+        evt.type = AUDIO_MGR_EVENT_BUTTON_RELEASE;
+        audio_manager_notify_event(&evt);
+        break;
+
+    case AUDIO_INT_EVT_WAKE_WORD:
+        evt.type = AUDIO_MGR_EVENT_WAKEUP_DETECTED;
+        evt.data.wakeup.wake_word_index = msg->data.wakeup.wake_word_index;
+        evt.data.wakeup.volume_db = msg->data.wakeup.volume_db;
+        audio_manager_notify_event(&evt);
+        s_ctx.recording = true;
+        audio_manager_arm_wake_timer(s_ctx.config.wakeup_config.wakeup_timeout_ms);
+        audio_manager_refresh_state();
+        break;
+
+    case AUDIO_INT_EVT_VAD_START:
+        evt.type = AUDIO_MGR_EVENT_VAD_START;
+        audio_manager_notify_event(&evt);
+        s_ctx.recording = true;
+        audio_manager_arm_wake_timer(s_ctx.config.wakeup_config.wakeup_timeout_ms);
+        audio_manager_refresh_state();
+        break;
+
+    case AUDIO_INT_EVT_VAD_END:
+        evt.type = AUDIO_MGR_EVENT_VAD_END;
+        audio_manager_notify_event(&evt);
+        s_ctx.recording = false;
+        audio_manager_arm_wake_timer(s_ctx.config.wakeup_config.wakeup_end_delay_ms);
+        audio_manager_refresh_state();
+        break;
+
+    case AUDIO_INT_EVT_WAKE_TIMEOUT:
+        evt.type = AUDIO_MGR_EVENT_WAKEUP_TIMEOUT;
+        audio_manager_notify_event(&evt);
+        s_ctx.recording = false;
+        audio_manager_clear_wake_timer();
+        audio_manager_refresh_state();
+        break;
+    }
+}
+
+static void audio_manager_task(void *arg)
+{
+    audio_mgr_internal_msg_t msg = {0};
+
+    while (true) {
+        if (xQueueReceive(s_ctx.event_queue, &msg, pdMS_TO_TICKS(AUDIO_MANAGER_STEP_INTERVAL_MS)) == pdTRUE) {
+            audio_manager_handle_internal_event(&msg);
+        }
+        audio_manager_tick();
     }
 }
 
@@ -189,161 +368,133 @@ static void afe_record_handler(const int16_t *pcm_data, size_t samples, void *us
  */
 esp_err_t audio_manager_init(const audio_mgr_config_t *config)
 {
-    // 检查是否已经初始化
+    esp_err_t ret = ESP_OK;
+
     if (s_ctx.initialized) {
         ESP_LOGW(TAG, "音频管理器已初始化");
         return ESP_OK;
     }
 
-    // 参数检查
-    if (!config || !config->event_callback) {
+    if (!config) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "======== 初始化音频管理器（模块化架构）========");
-
-    // 保存配置
+    ESP_LOGI(TAG, "======== 初始化音频管理器（模块化状态机）========");
+    memset(&s_ctx, 0, sizeof(s_ctx));
     memcpy(&s_ctx.config, config, sizeof(audio_mgr_config_t));
-    s_ctx.volume = 80;  // 默认音量 80%
+    s_ctx.volume = AUDIO_MANAGER_DEFAULT_VOLUME;
+    s_ctx.state = AUDIO_MGR_STATE_DISABLED;
 
-    // ========== 1. 创建 I2S HAL ==========
-    // 配置麦克风 I2S 参数
-    i2s_mic_config_t mic_cfg = {
-        .port = config->hw_config.mic.port,
-        .bclk_gpio = config->hw_config.mic.bclk_gpio,
-        .lrck_gpio = config->hw_config.mic.lrck_gpio,
-        .din_gpio = config->hw_config.mic.din_gpio,
-        .sample_rate = config->hw_config.mic.sample_rate,
-        .bits = config->hw_config.mic.bits,
-        .max_frame_samples = 512,  // 预分配 512 采样点的缓冲区
-        .bit_shift = 14,           // 默认右移 14 位（可根据音量调整：12-16）
+    audio_bsp_hw_config_t bsp_cfg = {
+        .mic = s_ctx.config.hw_config.mic,
+        .speaker = s_ctx.config.hw_config.speaker,
     };
 
-    // 配置扬声器 I2S 参数
-    i2s_speaker_config_t speaker_cfg = {
-        .port = config->hw_config.speaker.port,
-        .bclk_gpio = config->hw_config.speaker.bclk_gpio,
-        .lrck_gpio = config->hw_config.speaker.lrck_gpio,
-        .dout_gpio = config->hw_config.speaker.dout_gpio,
-        .sample_rate = config->hw_config.speaker.sample_rate,
-        .bits = config->hw_config.speaker.bits,
-        .max_frame_samples = PLAYBACK_FRAME_SAMPLES,
-    };
-
-    // 创建 I2S HAL 实例
-    s_ctx.i2s_hal = i2s_hal_create(&mic_cfg, &speaker_cfg);
-    if (!s_ctx.i2s_hal) {
-        ESP_LOGE(TAG, "I2S HAL 创建失败");
-        return ESP_ERR_NO_MEM;
+    s_ctx.bsp = audio_bsp_create(&bsp_cfg);
+    if (!s_ctx.bsp) {
+        ESP_LOGE(TAG, "BSP 创建失败");
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
     }
 
-    // ========== 2. 创建回采缓冲区 ==========
-    // 回采缓冲区用于存储扬声器播放的音频，供 AEC 使用
-    // 注意：这里创建的缓冲区会被播放控制器接管，后续会重新获取
-    s_ctx.reference_rb = ring_buffer_create(REFERENCE_BUFFER_SIZE / sizeof(int16_t), false);
-    if (!s_ctx.reference_rb) {
-        ESP_LOGE(TAG, "回采缓冲区创建失败");
-        i2s_hal_destroy(s_ctx.i2s_hal);
-        return ESP_ERR_NO_MEM;
-    }
-
-    // ========== 3. 创建播放控制器 ==========
     playback_controller_config_t playback_cfg = {
-        .i2s_hal = s_ctx.i2s_hal,
-        .playback_buffer_samples = PLAYBACK_BUFFER_SIZE / sizeof(int16_t),
-        .reference_buffer_samples = REFERENCE_BUFFER_SIZE / sizeof(int16_t),
-        .frame_samples = PLAYBACK_FRAME_SAMPLES,
-        .reference_callback = NULL,  // 使用缓冲区方式，不使用回调
+        .bsp_handle = s_ctx.bsp,
+        .playback_buffer_samples = AUDIO_MANAGER_PLAYBACK_BUFFER_BYTES / sizeof(int16_t),
+        .reference_buffer_samples = AUDIO_MANAGER_REFERENCE_BUFFER_BYTES / sizeof(int16_t),
+        .frame_samples = AUDIO_MANAGER_PLAYBACK_FRAME_SAMPLES,
+        .reference_callback = NULL,
         .reference_ctx = NULL,
-        .volume_ptr = &s_ctx.volume,  // 共享音量指针
+        .volume_ptr = &s_ctx.volume,
     };
 
     s_ctx.playback_ctrl = playback_controller_create(&playback_cfg);
     if (!s_ctx.playback_ctrl) {
         ESP_LOGE(TAG, "播放控制器创建失败");
-        ring_buffer_destroy(s_ctx.reference_rb);
-        i2s_hal_destroy(s_ctx.i2s_hal);
-        return ESP_ERR_NO_MEM;
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
     }
 
-    // 获取播放控制器的回采缓冲区（播放控制器会创建自己的缓冲区）
     s_ctx.reference_rb = playback_controller_get_reference_buffer(s_ctx.playback_ctrl);
 
-    // ========== 4. 创建 AFE 包装器 ==========
-    // 配置唤醒词检测参数
-    afe_wakeup_config_t afe_wakeup = {
-        .enabled = config->wakeup_config.enabled,
-        .wake_word_name = config->wakeup_config.wake_word_name,
-        .model_partition = config->wakeup_config.model_partition,
-        .sensitivity = config->wakeup_config.sensitivity,
-    };
+    s_ctx.event_queue = xQueueCreate(AUDIO_MANAGER_EVENT_QUEUE_LENGTH, sizeof(audio_mgr_internal_msg_t));
+    if (!s_ctx.event_queue) {
+        ESP_LOGE(TAG, "事件队列创建失败");
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
+    }
 
-    // 配置 VAD 参数
-    afe_vad_config_t afe_vad = {
-        .enabled = config->vad_config.enabled,
-        .vad_mode = config->vad_config.vad_mode,
-        .min_speech_ms = config->vad_config.min_speech_ms,
-        .min_silence_ms = config->vad_config.min_silence_ms,
-    };
+    if (xTaskCreatePinnedToCore(audio_manager_task,
+                                "audio_mgr",
+                                AUDIO_MANAGER_TASK_STACK_SIZE,
+                                NULL,
+                                AUDIO_MANAGER_TASK_PRIORITY,
+                                &s_ctx.manager_task,
+                                1) != pdPASS) {
+        ESP_LOGE(TAG, "状态机任务创建失败");
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
+    }
 
-    // 配置音频前端处理参数
-    afe_feature_config_t afe_feature = {
-        .aec_enabled = config->afe_config.aec_enabled,
-        .ns_enabled = config->afe_config.ns_enabled,
-        .agc_enabled = config->afe_config.agc_enabled,
-        .afe_mode = config->afe_config.afe_mode,
-    };
-
-    // 配置 AFE 包装器
     afe_wrapper_config_t afe_cfg = {
-        .i2s_hal = s_ctx.i2s_hal,
-        .reference_rb = s_ctx.reference_rb,  // 共享回采缓冲区
-        .wakeup_config = afe_wakeup,
-        .vad_config = afe_vad,
-        .feature_config = afe_feature,
-        .event_callback = afe_event_handler,  // AFE 事件回调
+        .bsp_handle = s_ctx.bsp,
+        .reference_rb = s_ctx.reference_rb,
+        .wakeup_config = (afe_wakeup_config_t){
+            .enabled = s_ctx.config.wakeup_config.enabled,
+            .wake_word_name = s_ctx.config.wakeup_config.wake_word_name,
+            .model_partition = s_ctx.config.wakeup_config.model_partition,
+            .sensitivity = s_ctx.config.wakeup_config.sensitivity,
+        },
+        .vad_config = (afe_vad_config_t){
+            .enabled = s_ctx.config.vad_config.enabled,
+            .vad_mode = s_ctx.config.vad_config.vad_mode,
+            .min_speech_ms = s_ctx.config.vad_config.min_speech_ms,
+            .min_silence_ms = s_ctx.config.vad_config.min_silence_ms,
+        },
+        .feature_config = (afe_feature_config_t){
+            .aec_enabled = s_ctx.config.afe_config.aec_enabled,
+            .ns_enabled = s_ctx.config.afe_config.ns_enabled,
+            .agc_enabled = s_ctx.config.afe_config.agc_enabled,
+            .afe_mode = s_ctx.config.afe_config.afe_mode,
+        },
+        .event_callback = afe_event_handler,
         .event_ctx = NULL,
-        .record_callback = afe_record_handler,  // 录音数据回调
+        .record_callback = afe_record_handler,
         .record_ctx = NULL,
-        .running_ptr = &s_ctx.running,  // 共享运行状态指针
-        .recording_ptr = &s_ctx.recording,  // 共享录音状态指针
+        .running_ptr = &s_ctx.running,
+        .recording_ptr = &s_ctx.recording,
     };
 
     s_ctx.afe_wrapper = afe_wrapper_create(&afe_cfg);
     if (!s_ctx.afe_wrapper) {
         ESP_LOGE(TAG, "AFE 包装器创建失败");
-        playback_controller_destroy(s_ctx.playback_ctrl);
-        i2s_hal_destroy(s_ctx.i2s_hal);
-        return ESP_ERR_NO_MEM;
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
     }
 
-    // ========== 5. 创建按键处理器 ==========
     button_handler_config_t button_cfg = {
-        .gpio = config->hw_config.button.gpio,
-        .active_low = config->hw_config.button.active_low,
-        .debounce_ms = 50,  // 50ms 防抖
-        .callback = button_event_handler,  // 按键事件回调
+        .gpio = s_ctx.config.hw_config.button.gpio,
+        .active_low = s_ctx.config.hw_config.button.active_low,
+        .debounce_ms = 50,
+        .callback = button_event_handler,
         .user_ctx = NULL,
     };
 
     s_ctx.button_handler = button_handler_create(&button_cfg);
     if (!s_ctx.button_handler) {
         ESP_LOGE(TAG, "按键处理器创建失败");
-        afe_wrapper_destroy(s_ctx.afe_wrapper);
-        playback_controller_destroy(s_ctx.playback_ctrl);
-        i2s_hal_destroy(s_ctx.i2s_hal);
-        return ESP_ERR_NO_MEM;
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
     }
 
-    // 标记为已初始化
     s_ctx.initialized = true;
-    ESP_LOGI(TAG, "✅ 音频管理器初始化完成（模块化架构）");
-    ESP_LOGI(TAG, "   - I2S HAL: ✓");
-    ESP_LOGI(TAG, "   - 播放控制器: ✓");
-    ESP_LOGI(TAG, "   - AFE 包装器: ✓");
-    ESP_LOGI(TAG, "   - 按键处理器: ✓");
-
+    s_ctx.state = AUDIO_MGR_STATE_IDLE;
+    audio_manager_refresh_state();
+    ESP_LOGI(TAG, "✅ 音频管理器初始化完成");
     return ESP_OK;
+
+fail:
+    audio_manager_deinit();
+    return ret;
 }
 
 /**
@@ -355,11 +506,23 @@ esp_err_t audio_manager_init(const audio_mgr_config_t *config)
 void audio_manager_deinit(void)
 {
     // 检查是否已初始化
-    if (!s_ctx.initialized) return;
+    if (!s_ctx.initialized && !s_ctx.bsp) {
+        return;
+    }
 
     // 停止所有运行中的功能
     audio_manager_stop();
     audio_manager_stop_playback();
+
+    if (s_ctx.manager_task) {
+        vTaskDelete(s_ctx.manager_task);
+        s_ctx.manager_task = NULL;
+    }
+
+    if (s_ctx.event_queue) {
+        vQueueDelete(s_ctx.event_queue);
+        s_ctx.event_queue = NULL;
+    }
 
     // 销毁按键处理器
     if (s_ctx.button_handler) {
@@ -380,9 +543,9 @@ void audio_manager_deinit(void)
     }
 
     // 销毁 I2S HAL
-    if (s_ctx.i2s_hal) {
-        i2s_hal_destroy(s_ctx.i2s_hal);
-        s_ctx.i2s_hal = NULL;
+    if (s_ctx.bsp) {
+        audio_bsp_destroy(s_ctx.bsp);
+        s_ctx.bsp = NULL;
     }
 
     // reference_rb 由播放控制器管理，不需要单独销毁
@@ -406,15 +569,8 @@ esp_err_t audio_manager_start(void)
     // 检查是否已初始化
     if (!s_ctx.initialized) return ESP_ERR_INVALID_STATE;
     
-    // 如果已经在运行，直接返回
-    if (s_ctx.running) return ESP_OK;
-
-    ESP_LOGI(TAG, "🎧 启动音频监听...");
-    s_ctx.running = true;
-
-    ESP_LOGI(TAG, "✅ 音频监听已启动，等待唤醒词: %s",
-             s_ctx.config.wakeup_config.wake_word_name);
-
+    audio_mgr_internal_msg_t msg = { .type = AUDIO_INT_EVT_START_LISTEN };
+    audio_manager_post_event(&msg);
     return ESP_OK;
 }
 
@@ -427,13 +583,11 @@ esp_err_t audio_manager_start(void)
  */
 esp_err_t audio_manager_stop(void)
 {
-    // 如果未运行，直接返回
-    if (!s_ctx.running) return ESP_OK;
-
-    ESP_LOGI(TAG, "🛑 停止音频监听");
-    s_ctx.running = false;
-    s_ctx.recording = false;
-
+    if (!s_ctx.initialized) {
+        return ESP_OK;
+    }
+    audio_mgr_internal_msg_t msg = { .type = AUDIO_INT_EVT_STOP_LISTEN };
+    audio_manager_post_event(&msg);
     return ESP_OK;
 }
 
@@ -452,16 +606,8 @@ esp_err_t audio_manager_trigger_conversation(void)
     // 检查是否已初始化
     if (!s_ctx.initialized) return ESP_ERR_INVALID_STATE;
 
-    // 构造按键触发事件
-    audio_mgr_event_t event = {
-        .type = AUDIO_MGR_EVENT_BUTTON_TRIGGER,
-    };
-
-    // 通知上层应用
-    if (s_ctx.config.event_callback) {
-        s_ctx.config.event_callback(&event, s_ctx.config.user_ctx);
-    }
-
+    audio_mgr_internal_msg_t msg = { .type = AUDIO_INT_EVT_BUTTON_PRESS };
+    audio_manager_post_event(&msg);
     return ESP_OK;
 }
 
@@ -481,6 +627,7 @@ esp_err_t audio_manager_start_recording(void)
 
     ESP_LOGI(TAG, "📼 开始录音");
     s_ctx.recording = true;
+    audio_manager_refresh_state();
 
     return ESP_OK;
 }
@@ -499,6 +646,7 @@ esp_err_t audio_manager_stop_recording(void)
 
     ESP_LOGI(TAG, "⏹️ 停止录音");
     s_ctx.recording = false;
+    audio_manager_refresh_state();
 
     return ESP_OK;
 }
@@ -550,7 +698,12 @@ esp_err_t audio_manager_start_playback(void)
     // 检查是否已初始化
     if (!s_ctx.initialized) return ESP_ERR_INVALID_STATE;
 
-    return playback_controller_start(s_ctx.playback_ctrl);
+    esp_err_t ret = playback_controller_start(s_ctx.playback_ctrl);
+    if (ret == ESP_OK) {
+        s_ctx.playing = true;
+        audio_manager_refresh_state();
+    }
+    return ret;
 }
 
 /**
@@ -565,7 +718,12 @@ esp_err_t audio_manager_stop_playback(void)
     // 检查是否已初始化
     if (!s_ctx.initialized) return ESP_OK;
 
-    return playback_controller_stop(s_ctx.playback_ctrl);
+    esp_err_t ret = playback_controller_stop(s_ctx.playback_ctrl);
+    if (ret == ESP_OK) {
+        s_ctx.playing = false;
+        audio_manager_refresh_state();
+    }
+    return ret;
 }
 
 /**
@@ -699,6 +857,11 @@ bool audio_manager_is_recording(void)
 bool audio_manager_is_playing(void)
 {
     return playback_controller_is_running(s_ctx.playback_ctrl);
+}
+
+audio_mgr_state_t audio_manager_get_state(void)
+{
+    return s_ctx.state;
 }
 
 /**

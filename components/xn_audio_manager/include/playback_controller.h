@@ -12,7 +12,7 @@
 
 #include "esp_err.h"
 #include "ring_buffer.h"
-#include "i2s_hal.h"
+#include "audio_bsp.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -28,7 +28,7 @@ typedef void (*playback_reference_callback_t)(const int16_t *samples, size_t cou
 
 /** 播放控制器配置 */
 typedef struct {
-    i2s_hal_handle_t i2s_hal;                       ///< I2S HAL 句柄
+    audio_bsp_handle_t bsp_handle;                  ///< 音频 BSP 句柄（抽象硬件）
     size_t playback_buffer_samples;                  ///< 播放缓冲区大小（采样点数）
     size_t reference_buffer_samples;                 ///< 回采缓冲区大小（采样点数）
     size_t frame_samples;                            ///< 每帧采样点数

@@ -30,7 +30,7 @@ typedef struct afe_wrapper_s {
     esp_afe_sr_iface_t *afe_handle;            ///< AFE 接口句柄
     srmodel_list_t *models;                     ///< 语音识别模型列表
     
-    i2s_hal_handle_t i2s_hal;                   ///< I2S HAL 句柄，用于读取麦克风数据
+    audio_bsp_handle_t bsp_handle;              ///< BSP 句柄，用于读取麦克风数据
     ring_buffer_handle_t reference_rb;         ///< 回采数据环形缓冲区
     
     afe_wakeup_config_t wakeup_config;         ///< 唤醒词配置
@@ -81,7 +81,7 @@ static int32_t afe_read_callback(void *buffer, int buf_sz, void *user_ctx, TickT
     // 仅在运行状态下读取数据
     if (wrapper->running_ptr && *wrapper->running_ptr) {
         // 读取麦克风数据
-        esp_err_t ret = i2s_hal_read_mic(wrapper->i2s_hal, wrapper->mic_buffer, 
+        esp_err_t ret = audio_bsp_read_mic(wrapper->bsp_handle, wrapper->mic_buffer, 
                                          frame_samples, &mic_got);
 
         if (ret != ESP_OK || mic_got == 0) {
@@ -171,7 +171,7 @@ static void afe_result_callback(afe_fetch_result_t *result, void *user_ctx)
  */
 afe_wrapper_handle_t afe_wrapper_create(const afe_wrapper_config_t *config)
 {
-    if (!config || !config->i2s_hal || !config->reference_rb || !config->event_callback) {
+    if (!config || !config->bsp_handle || !config->reference_rb || !config->event_callback) {
         ESP_LOGE(TAG, "无效的配置参数");
         return NULL;
     }
@@ -184,7 +184,7 @@ afe_wrapper_handle_t afe_wrapper_create(const afe_wrapper_config_t *config)
     }
 
     // 保存配置参数
-    wrapper->i2s_hal = config->i2s_hal;
+    wrapper->bsp_handle = config->bsp_handle;
     wrapper->reference_rb = config->reference_rb;
     wrapper->wakeup_config = config->wakeup_config;
     wrapper->event_callback = config->event_callback;

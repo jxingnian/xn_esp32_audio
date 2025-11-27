@@ -23,7 +23,7 @@ static const char *TAG = "PLAYBACK_CTRL";
  * 存储播放控制器的所有状态信息和资源句柄
  */
 typedef struct playback_controller_s {
-    i2s_hal_handle_t i2s_hal;                       ///< I2S HAL 句柄，用于音频输出
+    audio_bsp_handle_t bsp_handle;                  ///< BSP 句柄，用于音频输出
     ring_buffer_handle_t playback_rb;               ///< 播放缓冲区，存储待播放的音频数据
     ring_buffer_handle_t reference_rb;              ///< 回采缓冲区，存储回采的音频数据供AFE使用
     TaskHandle_t playback_task;                     ///< 播放任务句柄，用于管理播放任务
@@ -74,8 +74,8 @@ static void playback_task(void *arg)
             // 再播放音频数据到扬声器
             // 获取音量值，如果未设置音量指针则使用默认值80
             uint8_t volume = ctrl->volume_ptr ? *ctrl->volume_ptr : 80;
-            // 通过I2S HAL将音频数据写入扬声器
-            i2s_hal_write_speaker(ctrl->i2s_hal, frame, got, volume);
+            // 通过 BSP 将音频数据写入扬声器
+            audio_bsp_write_speaker(ctrl->bsp_handle, frame, got, volume);
         }
     }
 
@@ -96,7 +96,7 @@ static void playback_task(void *arg)
 playback_controller_handle_t playback_controller_create(const playback_controller_config_t *config)
 {
     // 参数校验
-    if (!config || !config->i2s_hal) {
+    if (!config || !config->bsp_handle) {
         ESP_LOGE(TAG, "无效的配置参数");
         return NULL;
     }
@@ -109,7 +109,7 @@ playback_controller_handle_t playback_controller_create(const playback_controlle
     }
 
     // 初始化配置参数
-    ctrl->i2s_hal = config->i2s_hal;
+    ctrl->bsp_handle = config->bsp_handle;
     ctrl->frame_samples = config->frame_samples;
     ctrl->reference_callback = config->reference_callback;
     ctrl->reference_ctx = config->reference_ctx;

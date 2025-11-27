@@ -11,7 +11,7 @@
 #pragma once
 
 #include "esp_err.h"
-#include "i2s_hal.h"
+#include "audio_bsp.h"
 #include "ring_buffer.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -70,7 +70,7 @@ typedef struct {
 
 /** AFE 包装器配置 */
 typedef struct {
-    i2s_hal_handle_t i2s_hal;                   ///< I2S HAL 句柄
+    audio_bsp_handle_t bsp_handle;             ///< BSP 句柄
     ring_buffer_handle_t reference_rb;          ///< 回采缓冲区
     afe_wakeup_config_t wakeup_config;          ///< 唤醒词配置
     afe_vad_config_t vad_config;                ///< VAD 配置
