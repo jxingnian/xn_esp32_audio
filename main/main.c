@@ -155,6 +155,20 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_manage_init(NULL));
 
     audio_mgr_config_t audio_cfg = AUDIO_MANAGER_DEFAULT_CONFIG();
+    audio_cfg.hw_config.mic.port = 1;
+    audio_cfg.hw_config.mic.bclk_gpio = 15;
+    audio_cfg.hw_config.mic.lrck_gpio = 2;
+    audio_cfg.hw_config.mic.din_gpio = 39;
+    audio_cfg.hw_config.mic.sample_rate = 16000;
+    audio_cfg.hw_config.mic.bits = 32;
+    audio_cfg.hw_config.speaker.port = 0;
+    audio_cfg.hw_config.speaker.bclk_gpio = 48;
+    audio_cfg.hw_config.speaker.lrck_gpio = 38;
+    audio_cfg.hw_config.speaker.dout_gpio = 47;
+    audio_cfg.hw_config.speaker.sample_rate = 16000;
+    audio_cfg.hw_config.speaker.bits = 16;
+    audio_cfg.hw_config.button.gpio = 0;
+    audio_cfg.hw_config.button.active_low = true;
     audio_cfg.event_callback = audio_event_cb;
     audio_cfg.user_ctx = &s_loop_ctx;
 
