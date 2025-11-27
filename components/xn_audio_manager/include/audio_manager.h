@@ -22,7 +22,7 @@ extern "C" {
 
 // ============ 调度与缓冲配置宏 ============
 
-#define AUDIO_MANAGER_TASK_STACK_SIZE        (4 * 1024)
+#define AUDIO_MANAGER_TASK_STACK_SIZE        (6 * 1024)
 #define AUDIO_MANAGER_TASK_PRIORITY          7
 #define AUDIO_MANAGER_EVENT_QUEUE_LENGTH     16
 #define AUDIO_MANAGER_STEP_INTERVAL_MS       100
