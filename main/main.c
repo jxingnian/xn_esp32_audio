@@ -1,23 +1,168 @@
 /*
  * @Author: 星年 jixingnian@gmail.com
  * @Date: 2025-11-22 13:43:50
- * @LastEditors: xingnian jixingnian@gmail.com
- * @LastEditTime: 2025-11-22 20:17:58
- * @FilePath: \xn_web_wifi_config\main\main.c
- * @Description: esp32 网页WiFi配网 By.星年
+ * @LastEditors: 星年 jixingnian@gmail.com
+ * @LastEditTime: 2025-11-27 21:08:00
+ * @FilePath: \xn_esp32_audio\main\main.c
+ * @Description:
+ *  - 初始化 WiFi 管理模块，确保联网能力正常
+ *  - 初始化音频管理器，注册状态机回调
+ *  - 当唤醒 + 讲话结束后，将录音回环到扬声器
+ *
+ * 运行步骤：
+ *  1. 供电后等待 “loopback test ready” 日志
+ *  2. 说出唤醒词（默认“小鸭小鸭”）或按键唤醒
+ *  3. 在 VAD 窗口讲话，结束后会立即播放刚才的录音
  */
 
 #include <stdio.h>
-#include <inttypes.h>
-#include "sdkconfig.h"
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_system.h"
-#include "xn_wifi_manage.h"
 
+#include "esp_log.h"
+#include "esp_system.h"
+#include "sdkconfig.h"
+
+#include "xn_wifi_manage.h"
+#include "audio_manager.h"
+
+static const char *TAG = "app";
+
+#define LOOPBACK_SECONDS          6
+#define LOOPBACK_SAMPLE_RATE      16000
+#define LOOPBACK_MAX_SAMPLES      (LOOPBACK_SECONDS * LOOPBACK_SAMPLE_RATE)
+
+typedef struct {
+    int16_t *buffer;
+    size_t   max_samples;
+    size_t   used_samples;
+    bool     capturing;
+} loopback_ctx_t;
+
+static int16_t       s_loop_buffer[LOOPBACK_MAX_SAMPLES];
+static loopback_ctx_t s_loop_ctx = {
+    .buffer = s_loop_buffer,
+    .max_samples = LOOPBACK_MAX_SAMPLES,
+};
+
+/* 清空捕获缓冲区状态，确保下一轮录音从头开始。 */
+static void loopback_reset(loopback_ctx_t *ctx)
+{
+    ctx->used_samples = 0;
+    ctx->capturing = false;
+}
+
+/* 将捕获的 PCM 数据依次写入播放缓冲区，触发播放任务输出。 */
+static void loopback_playback(loopback_ctx_t *ctx)
+{
+    if (ctx->used_samples == 0) {
+        ESP_LOGW(TAG, "no samples to playback");
+        return;
+    }
+
+    ESP_LOGI(TAG, "playback start, %u samples", (unsigned)ctx->used_samples);
+    audio_manager_clear_playback_buffer();
+
+    size_t offset = 0;
+    while (offset < ctx->used_samples) {
+        size_t chunk = ctx->used_samples - offset;
+        if (chunk > AUDIO_MANAGER_PLAYBACK_FRAME_SAMPLES) {
+            chunk = AUDIO_MANAGER_PLAYBACK_FRAME_SAMPLES;
+        }
+        esp_err_t ret = audio_manager_play_audio(ctx->buffer + offset, chunk);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "play audio failed: %s", esp_err_to_name(ret));
+            break;
+        }
+        offset += chunk;
+    }
+}
+
+static void loopback_record_cb(const int16_t *pcm_data,
+                               size_t sample_count,
+                               void *user_ctx)
+{
+    loopback_ctx_t *ctx = (loopback_ctx_t *)user_ctx;
+    if (!ctx || !ctx->capturing || !pcm_data || sample_count == 0) {
+        return;
+    }
+
+    size_t remain = ctx->max_samples - ctx->used_samples;
+    if (remain == 0) {
+        return;
+    }
+
+    size_t to_copy = sample_count > remain ? remain : sample_count;
+    memcpy(ctx->buffer + ctx->used_samples, pcm_data, to_copy * sizeof(int16_t));
+    ctx->used_samples += to_copy;
+}
+
+/* 音频管理事件：驱动唤醒→录音→VAD→回放的状态流。 */
+static void audio_event_cb(const audio_mgr_event_t *event, void *user_ctx)
+{
+    loopback_ctx_t *ctx = (loopback_ctx_t *)user_ctx;
+    if (!ctx || !event) {
+        return;
+    }
+
+    switch (event->type) {
+    case AUDIO_MGR_EVENT_WAKEUP_DETECTED:
+        ESP_LOGI(TAG, "wake word detected, start capture");
+        loopback_reset(ctx);
+        ctx->capturing = true;
+        audio_manager_start_recording();
+        break;
+
+    case AUDIO_MGR_EVENT_VAD_START:
+        if (!ctx->capturing) {
+            ctx->capturing = true;
+        }
+        break;
+
+    case AUDIO_MGR_EVENT_VAD_END:
+        if (ctx->capturing) {
+            ctx->capturing = false;
+            ESP_LOGI(TAG, "speech ended, total samples=%u", (unsigned)ctx->used_samples);
+            audio_manager_stop_recording();
+            loopback_playback(ctx);
+        }
+        break;
+
+    case AUDIO_MGR_EVENT_WAKEUP_TIMEOUT:
+        ESP_LOGW(TAG, "wake window timeout, discard recording");
+        loopback_reset(ctx);
+        audio_manager_stop_recording();
+        break;
+
+    case AUDIO_MGR_EVENT_BUTTON_TRIGGER:
+        ESP_LOGI(TAG, "button trigger, force capture");
+        loopback_reset(ctx);
+        ctx->capturing = true;
+        audio_manager_start_recording();
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* 应用入口：WiFi + 音频管理初始化，把录音/事件回调接入状态机。 */
 void app_main(void)
 {
-    printf("esp32 网页WiFi配网 By.星年\n");
-    esp_err_t ret = wifi_manage_init(NULL);
-    (void)ret; 
+    ESP_LOGI(TAG, "init WiFi manager");
+    ESP_ERROR_CHECK(wifi_manage_init(NULL));
+
+    audio_mgr_config_t audio_cfg = AUDIO_MANAGER_DEFAULT_CONFIG();
+    audio_cfg.event_callback = audio_event_cb;
+    audio_cfg.user_ctx = &s_loop_ctx;
+
+    ESP_LOGI(TAG, "init audio manager");
+    ESP_ERROR_CHECK(audio_manager_init(&audio_cfg));
+    audio_manager_set_record_callback(loopback_record_cb, &s_loop_ctx);
+    ESP_ERROR_CHECK(audio_manager_start());
+    ESP_ERROR_CHECK(audio_manager_start_playback()); // keep playback task alive
+
+    ESP_LOGI(TAG, "loopback test ready: say wake word -> speak -> hear echo");
 }
