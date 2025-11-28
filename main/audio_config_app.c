@@ -2,7 +2,7 @@
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 21:48:21
  * @LastEditors: xingnian jixingnian@gmail.com
- * @LastEditTime: 2025-11-28 17:21:24
+ * @LastEditTime: 2025-11-28 17:44:51
  * @FilePath: \xn_esp32_audio\main\audio_config_app.c
  * @Description: 音频配置
  * 
@@ -50,8 +50,8 @@ void audio_config_app_build(audio_mgr_config_t *cfg,
     cfg->vad_config.min_silence_ms = 400;
 
     cfg->afe_config.aec_enabled = false;
-    cfg->afe_config.ns_enabled = true;
-    cfg->afe_config.agc_enabled = true;
+    cfg->afe_config.ns_enabled = false;
+    cfg->afe_config.agc_enabled = false;
     cfg->afe_config.afe_mode = 1;
 
     cfg->event_callback = event_cb;
