@@ -2,7 +2,7 @@
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 19:17:04
  * @LastEditors: xingnian j_xingnian@163.com
- * @LastEditTime: 2025-11-28 19:05:22
+ * @LastEditTime: 2025-11-28 19:53:21
  * @FilePath: \xn_esp32_audio\components\audio_manager\src\afe_wrapper.c
  * @Description: AFE 管理模块实现
  * 
@@ -231,7 +231,7 @@ afe_wrapper_handle_t afe_wrapper_create(const afe_wrapper_config_t *config)
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;    // 优先使用 PSRAM
     afe_config->agc_init = config->feature_config.agc_enabled;     // 自动增益控制
     afe_config->ns_init = config->feature_config.ns_enabled;       // 噪声抑制
-    afe_config->afe_ringbuf_size = 60;                              // 环形缓冲区大小（增大以防止溢出）
+    afe_config->afe_ringbuf_size = 120;                             // 环形缓冲区大小（加大以提供更多缓冲空间）
 
     // 验证配置并创建 AFE 句柄
     afe_config = afe_config_check(afe_config);
