@@ -1,9 +1,9 @@
 /*
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 19:17:04
- * @LastEditors: xingnian j_xingnian@163.com
- * @LastEditTime: 2025-11-28 19:53:21
- * @FilePath: \xn_esp32_audio\components\audio_manager\src\afe_wrapper.c
+ * @LastEditors: xingnian jixingnian@gmail.com
+ * @LastEditTime: 2025-11-28 20:27:24
+ * @FilePath: \xn_esp32_audio\components\xn_audio_manager\src\afe_wrapper.c
  * @Description: AFE 管理模块实现
  * 
  * Copyright (c) 2025 by ${git_name_email}, All Rights Reserved. 
@@ -103,9 +103,9 @@ static int32_t afe_read_callback(void *buffer, int buf_sz, void *user_ctx, TickT
             out_buf[i * 2 + 1] = wrapper->ref_buffer[i];  // R: 回采
         }
     } else {
-        // 未运行时填充静音
+        // 未运行时填充静音，并临时不向 AFE 提供有效数据，避免在系统尚未开始监听时填满内部 ringbuffer
         memset(out_buf, 0, buf_sz);
-        mic_got = frame_samples;
+        return 0;
     }
 
     return mic_got * channels * sizeof(int16_t);
@@ -243,12 +243,12 @@ afe_wrapper_handle_t afe_wrapper_create(const afe_wrapper_config_t *config)
         .read_cb = afe_read_callback,              // 数据读取回调
         .read_ctx = wrapper,                       // 读取回调上下文
         .feed_task_setting = {
-            .stack_size = 6 * 1024,                // Feed 任务栈大小（缩减以降低内部RAM占用）
+            .stack_size = 10 * 1024,               // Feed 任务栈大小（缩减以降低内部RAM占用）
             .prio = 8,                             // Feed 任务优先级
             .core = 1,                             // Feed 任务运行核心（保持在 CPU1）
         },
         .fetch_task_setting = {
-            .stack_size = 6 * 1024,                // Fetch 任务栈大小（缩减占用）
+            .stack_size = 10 * 1024,                // Fetch 任务栈大小（缩减占用）
             .prio = 8,                             // Fetch 任务优先级（与Feed相同，时间片轮转）
             .core = 0,                             // Fetch 任务运行在 CPU0，与 Feed 分核
         },

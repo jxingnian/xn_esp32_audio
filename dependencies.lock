@@ -72,7 +72,7 @@ dependencies:
       type: service
     version: 2.3.0
   espressif/gmf_ai_audio:
-    component_hash: b89fe223dbdb6666f1ab9a585629acb5302aaade6c79db02849f32f926eb7703
+    component_hash: c8d133c160708d292dd8e542e7f724889316100bac8189eab69c82e10447495a
     dependencies:
     - name: espressif/esp-sr
       registry_url: https://components.espressif.com
@@ -85,7 +85,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 0.7.1
+    version: 0.7.4
   espressif/gmf_core:
     component_hash: 244a6ccddb77b001600ec80f311647044c235e50c227db739abeb42d763f862f
     dependencies: []
@@ -102,6 +102,6 @@ direct_dependencies:
 - espressif/esp_audio_codec
 - espressif/gmf_ai_audio
 - idf
-manifest_hash: 130fc9206febac85383b3949226889aab5011fef550d24542c749a62911ad260
+manifest_hash: e296c4d59cf5ef7176335968ebc2e71b7c0049f1e1f5f4e759280515134b91b4
 target: esp32s3
 version: 2.0.0

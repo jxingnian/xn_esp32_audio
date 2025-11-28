@@ -1,8 +1,8 @@
 /*
  * @Author: 星年 jixingnian@gmail.com
  * @Date: 2025-11-22 13:43:50
- * @LastEditors: 星年 jixingnian@gmail.com
- * @LastEditTime: 2025-11-27 21:08:00
+ * @LastEditors: xingnian j_xingnian@163.com
+ * @LastEditTime: 2025-11-28 20:14:30
  * @FilePath: \xn_esp32_audio\main\main.c
  * @Description:
  *  - 初始化 WiFi 管理模块，确保联网能力正常
@@ -149,12 +149,31 @@ static void audio_event_cb(const audio_mgr_event_t *event, void *user_ctx)
     }
 }
 
+static void cpu_usage_monitor_task(void *arg)
+{
+    char stats[512];
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        memset(stats, 0, sizeof(stats));
+        vTaskGetRunTimeStats(stats);
+        ESP_LOGI(TAG, "CPU usage stats:\n%s", stats);
+    }
+}
+
 /* 应用入口：WiFi + 音频管理初始化，把录音/事件回调接入状态机。 */
 void app_main(void)
 {
     // ESP_LOGI(TAG, "init WiFi manager");
     // ESP_ERROR_CHECK(wifi_manage_init(NULL));
 
+    // xTaskCreatePinnedToCore(cpu_usage_monitor_task,
+    //                         "cpu_mon",
+    //                         4096,
+    //                         NULL,
+    //                         1,
+    //                         NULL,
+    //                         0);
     audio_mgr_config_t audio_cfg;
     audio_config_app_build(&audio_cfg, audio_event_cb, &s_loop_ctx);
 
@@ -165,4 +184,5 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_manager_start_playback()); // keep playback task alive
 
     ESP_LOGI(TAG, "loopback test ready: say wake word -> speak -> hear echo");
+
 }
