@@ -1,8 +1,8 @@
 /*
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 19:17:04
- * @LastEditors: xingnian jixingnian@gmail.com
- * @LastEditTime: 2025-11-27 19:20:42
+ * @LastEditors: xingnian j_xingnian@163.com
+ * @LastEditTime: 2025-11-28 19:05:22
  * @FilePath: \xn_esp32_audio\components\audio_manager\src\afe_wrapper.c
  * @Description: AFE 管理模块实现
  * 
@@ -226,12 +226,12 @@ afe_wrapper_handle_t afe_wrapper_create(const afe_wrapper_config_t *config)
     afe_config->vad_min_noise_ms = config->vad_config.min_silence_ms;   // 最小静音时长
     afe_config->wakenet_init = config->wakeup_config.enabled;      // 唤醒词检测
     afe_config->wakenet_mode = config->wakeup_config.sensitivity;   // 唤醒词灵敏度
-    afe_config->afe_perferred_core = 1;                             // 优先运行在核心 1
+    afe_config->afe_perferred_core = 0;                             // 优先运行在核心 0
     afe_config->afe_perferred_priority = 8;                         // 任务优先级
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;    // 优先使用 PSRAM
     afe_config->agc_init = config->feature_config.agc_enabled;     // 自动增益控制
     afe_config->ns_init = config->feature_config.ns_enabled;       // 噪声抑制
-    afe_config->afe_ringbuf_size = 30;                              // 环形缓冲区大小（增大以防止溢出）
+    afe_config->afe_ringbuf_size = 60;                              // 环形缓冲区大小（增大以防止溢出）
 
     // 验证配置并创建 AFE 句柄
     afe_config = afe_config_check(afe_config);

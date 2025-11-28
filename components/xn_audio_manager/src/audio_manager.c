@@ -1,8 +1,8 @@
 /*
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 19:17:04
- * @LastEditors: xingnian jixingnian@gmail.com
- * @LastEditTime: 2025-11-27 19:20:57
+ * @LastEditors: xingnian j_xingnian@163.com
+ * @LastEditTime: 2025-11-28 19:36:06
  * @FilePath: \xn_esp32_audio\components\audio_manager\src\audio_manager.c
  * @Description: 音频管理器实现 - 模块化架构
  * 
@@ -429,7 +429,7 @@ esp_err_t audio_manager_init(const audio_mgr_config_t *config)
                                 NULL,
                                 AUDIO_MANAGER_TASK_PRIORITY,
                                 &s_ctx.manager_task,
-                                1) != pdPASS) {
+                                0) != pdPASS) {
         ESP_LOGE(TAG, "状态机任务创建失败");
         ret = ESP_ERR_NO_MEM;
         goto fail;
