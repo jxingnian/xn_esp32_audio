@@ -152,8 +152,8 @@ static void audio_event_cb(const audio_mgr_event_t *event, void *user_ctx)
 /* 应用入口：WiFi + 音频管理初始化，把录音/事件回调接入状态机。 */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "init WiFi manager");
-    ESP_ERROR_CHECK(wifi_manage_init(NULL));
+    // ESP_LOGI(TAG, "init WiFi manager");
+    // ESP_ERROR_CHECK(wifi_manage_init(NULL));
 
     audio_mgr_config_t audio_cfg;
     audio_config_app_build(&audio_cfg, audio_event_cb, &s_loop_ctx);
