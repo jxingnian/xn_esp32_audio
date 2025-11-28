@@ -2,7 +2,7 @@
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 21:48:21
  * @LastEditors: xingnian jixingnian@gmail.com
- * @LastEditTime: 2025-11-28 17:44:51
+ * @LastEditTime: 2025-11-28 18:09:59
  * @FilePath: \xn_esp32_audio\main\audio_config_app.c
  * @Description: 音频配置
  * 
@@ -52,7 +52,7 @@ void audio_config_app_build(audio_mgr_config_t *cfg,
     cfg->afe_config.aec_enabled = false;
     cfg->afe_config.ns_enabled = false;
     cfg->afe_config.agc_enabled = false;
-    cfg->afe_config.afe_mode = 1;
+    cfg->afe_config.afe_mode = 0;
 
     cfg->event_callback = event_cb;
     cfg->user_ctx = user_ctx;

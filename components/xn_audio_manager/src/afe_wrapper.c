@@ -245,12 +245,12 @@ afe_wrapper_handle_t afe_wrapper_create(const afe_wrapper_config_t *config)
         .feed_task_setting = {
             .stack_size = 6 * 1024,                // Feed 任务栈大小（缩减以降低内部RAM占用）
             .prio = 8,                             // Feed 任务优先级
-            .core = 1,                             // Feed 任务运行核心
+            .core = 1,                             // Feed 任务运行核心（保持在 CPU1）
         },
         .fetch_task_setting = {
             .stack_size = 6 * 1024,                // Fetch 任务栈大小（缩减占用）
             .prio = 8,                             // Fetch 任务优先级（与Feed相同，时间片轮转）
-            .core = 1,                             // Fetch 任务运行核心
+            .core = 0,                             // Fetch 任务运行在 CPU0，与 Feed 分核
         },
     };
 
