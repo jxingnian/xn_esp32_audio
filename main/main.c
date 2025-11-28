@@ -1,8 +1,8 @@
 /*
  * @Author: 星年 jixingnian@gmail.com
  * @Date: 2025-11-22 13:43:50
- * @LastEditors: xingnian j_xingnian@163.com
- * @LastEditTime: 2025-11-28 20:14:30
+ * @LastEditors: xingnian jixingnian@gmail.com
+ * @LastEditTime: 2025-11-28 20:41:28
  * @FilePath: \xn_esp32_audio\main\main.c
  * @Description:
  *  - 初始化 WiFi 管理模块，确保联网能力正常
@@ -40,6 +40,7 @@ typedef struct {
     size_t   max_samples;
     size_t   used_samples;
     bool     capturing;
+    TickType_t ignore_until;
 } loopback_ctx_t;
 
 static int16_t       s_loop_buffer[LOOPBACK_MAX_SAMPLES];
@@ -79,6 +80,10 @@ static void loopback_playback(loopback_ctx_t *ctx)
         }
         offset += chunk;
     }
+
+    uint32_t ms = (uint32_t)(ctx->used_samples * 1000 / LOOPBACK_SAMPLE_RATE);
+    ms += 300;
+    ctx->ignore_until = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
 }
 
 static void loopback_record_cb(const int16_t *pcm_data,
@@ -109,24 +114,23 @@ static void audio_event_cb(const audio_mgr_event_t *event, void *user_ctx)
     }
 
     switch (event->type) {
-    case AUDIO_MGR_EVENT_WAKEUP_DETECTED:
-        ESP_LOGI(TAG, "wake word detected, start capture");
+    case AUDIO_MGR_EVENT_VAD_START:
+        ESP_LOGI(TAG, "VAD start, begin capture");
+        {
+            TickType_t now = xTaskGetTickCount();
+            if (ctx->ignore_until && (int32_t)(now - ctx->ignore_until) < 0) {
+                ESP_LOGI(TAG, "VAD start ignored (echo window)");
+                break;
+            }
+        }
         loopback_reset(ctx);
         ctx->capturing = true;
-        audio_manager_start_recording();
-        break;
-
-    case AUDIO_MGR_EVENT_VAD_START:
-        if (!ctx->capturing) {
-            ctx->capturing = true;
-        }
         break;
 
     case AUDIO_MGR_EVENT_VAD_END:
         if (ctx->capturing) {
             ctx->capturing = false;
             ESP_LOGI(TAG, "speech ended, total samples=%u", (unsigned)ctx->used_samples);
-            audio_manager_stop_recording();
             loopback_playback(ctx);
         }
         break;
@@ -134,14 +138,12 @@ static void audio_event_cb(const audio_mgr_event_t *event, void *user_ctx)
     case AUDIO_MGR_EVENT_WAKEUP_TIMEOUT:
         ESP_LOGW(TAG, "wake window timeout, discard recording");
         loopback_reset(ctx);
-        audio_manager_stop_recording();
         break;
 
     case AUDIO_MGR_EVENT_BUTTON_TRIGGER:
         ESP_LOGI(TAG, "button trigger, force capture");
         loopback_reset(ctx);
         ctx->capturing = true;
-        audio_manager_start_recording();
         break;
 
     default:

@@ -1,8 +1,8 @@
 /*
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 21:48:21
- * @LastEditors: xingnian j_xingnian@163.com
- * @LastEditTime: 2025-11-28 20:22:37
+ * @LastEditors: xingnian jixingnian@gmail.com
+ * @LastEditTime: 2025-11-28 20:47:00
  * @FilePath: \xn_esp32_audio\main\audio_config_app.c
  * @Description: 音频配置
  * 
@@ -37,7 +37,7 @@ void audio_config_app_build(audio_mgr_config_t *cfg,
     cfg->hw_config.button.gpio = 0;
     cfg->hw_config.button.active_low = true;
 
-    cfg->wakeup_config.enabled = true;
+    cfg->wakeup_config.enabled = false;
     cfg->wakeup_config.wake_word_name = "小鸭小鸭";
     cfg->wakeup_config.model_partition = "model";
     cfg->wakeup_config.sensitivity = 2;
