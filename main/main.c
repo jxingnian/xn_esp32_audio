@@ -181,6 +181,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "init audio manager");
     ESP_ERROR_CHECK(audio_manager_init(&audio_cfg));
+    audio_manager_set_volume(100);
     audio_manager_set_record_callback(loopback_record_cb, &s_loop_ctx);
     ESP_ERROR_CHECK(audio_manager_start());
     ESP_ERROR_CHECK(audio_manager_start_playback()); // keep playback task alive

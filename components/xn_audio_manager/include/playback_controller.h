@@ -2,8 +2,8 @@
  * @Author: 星年 && jixingnian@gmail.com
  * @Date: 2025-11-27 19:17:04
  * @LastEditors: xingnian jixingnian@gmail.com
- * @LastEditTime: 2025-11-27 19:19:51
- * @FilePath: \xn_esp32_audio\components\audio_manager\include\playback_controller.h
+ * @LastEditTime: 2025-11-28 21:15:25
+ * @FilePath: \xn_esp32_audio\components\xn_audio_manager\include\playback_controller.h
  * @Description: 播放控制模块 - 管理音频播放任务和缓冲区
  * 
  * Copyright (c) 2025 by ${git_name_email}, All Rights Reserved. 
